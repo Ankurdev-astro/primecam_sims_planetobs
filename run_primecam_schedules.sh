@@ -38,16 +38,23 @@ if [[ ! -z $2 ]]; then
     STOP_IDX=$2
 fi
 
-# Default value for NDETS
+# Default value for NDETS. Use FULL for no trimming.
 NDETS=100
 # Read optional NDETS from command-line arguments
 if [[ ! -z $3 ]]; then
     NDETS=$3
 fi
 
+# Default value for module arrays
+MODULE_ARRAYS=1
+# Read optional MODULE_ARRAYS from command-line arguments
+if [[ ! -z $4 ]]; then
+    MODULE_ARRAYS=$4
+fi
+
 # Focalplane file
 # Run the fp_trim script with the specified number of detectors (NDETS)
-python -m scripts.fp_scripts.fp_trim $NDETS
+python -m scripts.fp_scripts.fp_trim $NDETS --module-arrays $MODULE_ARRAYS
 # Check if the fp_trim script executed successfully
 if [ $? -ne 0 ]; then
     # If there was an error, print an error message and exit the script
@@ -73,7 +80,7 @@ do
     # (nice -n 10 bash -c "echo -e '\n****************\n' ; /usr/bin/time -v mpirun -np 16 python sim_data_primecam_mpi.py -s \"$SCH_NAME\"") 2>&1 | tee -a toast_270924_arc10.log
     # mpirun -np 16 python sim_data_primecam_mpi.py -s $SCH_NAME -d 300 -g 2
     # mpirun -n 16 python sim_data_primecam_mpi.py -s $SCH_NAME -d $NDETS
-    mpirun -n 8 python sim_data_primecam_mpi.py -s $SCH_NAME -d $NDETS
+    mpirun -n 8 python sim_data_primecam_mpi.py -s $SCH_NAME -d $NDETS --module-arrays $MODULE_ARRAYS
 
     # -g GRP_SIZE sets the number of processes per group
     # N_GRP = N_TASKS / GRP_SIZE
@@ -86,10 +93,10 @@ done
 
 ### End of script ###
 ### Notes:
-# ./run_primecam_schedules.sh START_IDX STOP_IDX
-# ./run_primecam_schedules.sh 2 5
+# ./run_primecam_schedules.sh START_IDX STOP_IDX NDETS MODULE_ARRAYS
+# ./run_primecam_schedules.sh 2 5 100 1
 # This will run the schedule files at indices 2, 3, and 4 in the array of schedule files.
 # Default START_IDX=0 and STOP_IDX=length of the array of schedule files.
 # Run as:
-# /usr/bin/time -v ./run_primecam_schedules.sh 0 1 100 2>&1 | tee -a logs/toast_270924_arc10.log
+# /usr/bin/time -v ./run_primecam_schedules.sh 0 1 100 1 2>&1 | tee -a logs/toast_270924_arc10.log
 

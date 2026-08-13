@@ -1,86 +1,158 @@
-# Imports
+import argparse
 import numpy as np
 import os
-import argparse
+
+import toast
+from toast.utils import Logger
 from astropy.table import QTable
 
-def read_full_table(file_path):
+
+FULL_DETS = "FULL"
+
+
+def parse_requested_dets(requested_dets):
+    if isinstance(requested_dets, str) and requested_dets.upper() == FULL_DETS:
+        return FULL_DETS
+
     try:
-        return QTable.read(file_path, path='dettable_stack')
-    except Exception as e:
-        print(f"Error reading the table: {e}")
-        exit(1)
+        ndets = int(requested_dets)
+    except (TypeError, ValueError):
+        raise ValueError("requested_dets must be an even integer >= 10 or FULL.")
 
-def select_wafer(dettable, wafer_slot):
-    return dettable[dettable['wafer_slot'] == wafer_slot]
+    if ndets < 10 or ndets % 2 != 0:
+        raise ValueError("requested_dets must be an even integer >= 10 or FULL.")
+    return ndets
 
-def parse_arguments():
-    parser = argparse.ArgumentParser(description="Select detectors from the w2 wafer.")
-    parser.add_argument(
-        "ndets_selected", 
-        type=int, 
-        help="Number of detectors to select. Must be an even number and >= 10."
-    )
-    args = parser.parse_args()
-    if args.ndets_selected < 10 or args.ndets_selected % 2 != 0:
-        raise argparse.ArgumentTypeError("ndets_selected must be an even number and at least 10.")
-    return parser.parse_args()
 
-def validate_selection(ndets_selected, total_dets):
-    if ndets_selected > total_dets:
-        raise ValueError(f"Error: ndets_selected ({ndets_selected}) cannot exceed "
-                         f"the total number of detectors in w2 ({total_dets}).")
+def selected_module_table(dettable_full, module_arrays):
+    if module_arrays == 1:
+        wafer_slots = ["w2"]
+    elif module_arrays == 3:
+        wafer_slots = ["w1", "w2", "w3"]
+    else:
+        raise ValueError("module_arrays must be either 1 or 3.")
 
-def generate_trimmed_table(trim_dettable_w2, ndets_selected):
-    first_index = trim_dettable_w2["index"][0]
-    last_index = trim_dettable_w2["index"][-1]
+    wafer_mask = np.zeros(len(dettable_full), dtype=bool)
+    for wafer_slot in wafer_slots:
+        wafer_mask |= dettable_full['wafer_slot'] == wafer_slot
+    return dettable_full[wafer_mask], wafer_slots
+
+
+def generate_trimmed_table(module_dettable, ndets_selected):
     pairs_select = ndets_selected // 2
-    linspace_indices = np.linspace(first_index, last_index, pairs_select, dtype=int)
-    pixels_select = trim_dettable_w2[np.isin(trim_dettable_w2["index"], linspace_indices)]['pixel']
-    pixel_strings = [f"{int(pixel):04}".encode('utf-8') for pixel in pixels_select]
-    mask = np.isin(trim_dettable_w2['pixel'], pixel_strings)
-    return trim_dettable_w2[mask]
 
-def write_trimmed_table(sel_dettable, file_path):
-    sel_dettable.write(file_path, path='dettable_trim', serialize_meta=True, overwrite=True)
+    pair_keys = []
+    seen_pair_keys = set()
+    for wafer_slot, pixel in zip(module_dettable['wafer_slot'], module_dettable['pixel']):
+        key = (wafer_slot, pixel)
+        if key in seen_pair_keys:
+            continue
+        seen_pair_keys.add(key)
+        pair_keys.append(key)
+
+    selected_pair_indices = np.linspace(0, len(pair_keys) - 1, pairs_select, dtype=int)
+    selected_pair_keys = {pair_keys[index] for index in selected_pair_indices}
+
+    mask = np.array(
+        [
+            (wafer_slot, pixel) in selected_pair_keys
+            for wafer_slot, pixel in zip(module_dettable['wafer_slot'], module_dettable['pixel'])
+        ]
+    )
+    trim_dettable = module_dettable[mask]
+
+    if len(trim_dettable) != ndets_selected:
+        raise RuntimeError(
+            f"Selected {len(trim_dettable)} detectors, expected {ndets_selected}. "
+            "Check the detector table pair structure."
+        )
+
+    return trim_dettable
+
+
+def build_fp_file(requested_dets, module_arrays=1, fp_dir="./input_files/fp_files/"):
+    """Build or reuse the focalplane file and return (ndets_selected, path)."""
+    hf_fulltable_file = os.path.join(fp_dir, "fp_f280_dettable.h5")
+    dettable_full = QTable.read(hf_fulltable_file, path='dettable_stack')
+
+    requested_dets = parse_requested_dets(requested_dets)
+    module_dettable, wafer_slots = selected_module_table(dettable_full, module_arrays)
+    total_module_dets = len(module_dettable)
+
+    if requested_dets == FULL_DETS:
+        ndets_selected = total_module_dets
+        trim_dettable = module_dettable
+    else:
+        ndets_selected = requested_dets
+        if ndets_selected > total_module_dets:
+            message = (
+                f"Requested dets ({ndets_selected}) exceeds the total number of detectors "
+                f"in {', '.join(wafer_slots)} ({total_module_dets} dets)."
+            )
+            if module_arrays == 1:
+                message += " Try --module-arrays 3 or use --dets FULL."
+            else:
+                message += " Use --dets FULL to select all available detectors."
+            raise ValueError(message)
+
+        trim_dettable = generate_trimmed_table(module_dettable, ndets_selected)
+
+    focalplane_file = f"dets_FP_PC280_{ndets_selected}.h5"
+    fp_filename = os.path.join(fp_dir, focalplane_file)
+
+    trim_dettable.meta["module_arrays"] = module_arrays
+    trim_dettable.meta["requested_dets"] = str(requested_dets)
+    trim_dettable.meta["wafer_slots"] = ",".join(wafer_slots)
+
+    write_focalplane = True
+    if os.path.exists(fp_filename):
+        try:
+            existing_dettable = QTable.read(fp_filename, path='dettable_trim')
+            write_focalplane = (
+                len(existing_dettable) != ndets_selected
+                or existing_dettable.meta.get("module_arrays") != module_arrays
+                or existing_dettable.meta.get("requested_dets") != str(requested_dets)
+                or existing_dettable.meta.get("wafer_slots") != ",".join(wafer_slots)
+            )
+        except Exception:
+            write_focalplane = True
+
+    if write_focalplane:
+        trim_dettable.write(
+            fp_filename,
+            path='dettable_trim',
+            serialize_meta=True,
+            overwrite=True,
+        )
+
+    return ndets_selected, fp_filename
+
 
 def main():
-    fp_dir = "./input_files/fp_files/"
-    # print(f"FP directory: {fp_dir}")
-    hf_fulltable_file = os.path.join(fp_dir, "fp_f280_dettable.h5")
-    # print(f"Full detector table file: {hf_fulltable_file}")
-    dettable_full = read_full_table(hf_fulltable_file)
-    trim_dettable_w2 = select_wafer(dettable_full, 'w2')
-    # print(f"Number of detectors in w2: {len(trim_dettable_w2)}")
+    parser = argparse.ArgumentParser(description="Build a PrimeCam focalplane file.")
+    parser.add_argument(
+        "requested_dets",
+        help="Number of detectors to select, or FULL for no trimming.",
+    )
+    parser.add_argument(
+        "--module-arrays",
+        "--MODULE_ARRAYS",
+        dest="module_arrays",
+        type=int,
+        choices=[1, 3],
+        default=int(os.environ.get("MODULE_ARRAYS", 1)),
+        help="Number of module arrays to use: 1 selects w2, 3 selects w1/w2/w3.",
+    )
+    args = parser.parse_args()
+    ndets_selected, fp_filename = build_fp_file(
+        args.requested_dets,
+        module_arrays=args.module_arrays,
+    )
+    Logger.get().info(
+        f"Using {args.module_arrays} module array(s), focalplane file "
+        f"{fp_filename} with {ndets_selected} detectors."
+    )
 
-    args = parse_arguments()
-    validate_selection(args.ndets_selected, len(trim_dettable_w2))
-
-    # print(f"Selecting {args.ndets_selected} detectors from w2.")
-    dets_trim_filename = f"dets_FP_PC280_{args.ndets_selected}_w2.h5"
-    
-    hf_trimtable_file = os.path.join(fp_dir, dets_trim_filename)
-    # lockfile = hf_trimtable_file + ".lock"
-    # lock = FileLock(lockfile)
-
-    # with lock:
-    #     if not os.path.exists(hf_trimtable_file):
-    #         # print("Generating trimmed detector table file ...")
-    #         sel_dettable = generate_trimmed_table(trim_dettable_w2, args.ndets_selected)
-    #         print(f"Number of selected detectors: {len(sel_dettable)}")
-    #         print(f"Writing trimmed detector table to {hf_trimtable_file} ...")
-    #         write_trimmed_table(sel_dettable, hf_trimtable_file)
-        
-    # if os.path.exists(lockfile):
-    #     os.remove(lockfile)
-    
-
-    if not os.path.exists(hf_trimtable_file):
-        # print("Generating trimmed detector table file ...")
-        sel_dettable = generate_trimmed_table(trim_dettable_w2, args.ndets_selected)
-        print(f"Number of selected detectors: {len(sel_dettable)}")
-        print(f"Writing trimmed detector table to {hf_trimtable_file} ...")
-        write_trimmed_table(sel_dettable, hf_trimtable_file)
 
 if __name__ == "__main__":
     main()

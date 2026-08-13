@@ -32,6 +32,7 @@
 #04-02-2025: Updated gains for atm sim
 #21-09-2025: Updated all dets to correct for NET values
 #21-09-2025: Updated gains for atm sim
+#13-08-2026: Updated fp_trim and mockdata_pipeline to include full module selection
 ###
 
 """
@@ -55,6 +56,7 @@ import toast.io as io
 import toast.ops
 from toast.mpi import MPI
 from scripts.helper_scripts.calc_groupsize import job_group_size, estimate_group_size
+from scripts.fp_scripts import fp_trim
 from scripts.sso_scripts.sim_sso import SimSSO
 
 import astropy.units as u
@@ -224,7 +226,6 @@ def primecam_mockdata_pipeline(args, comm, focalplane, schedule, group_size):
             )
     sso.apply(data)
     log.info_rank(" Simulated SSO signal in", comm=world_comm, timer=timer)
-    
     #--------------------------------------------------------#
 
     ### Atmospheric simulation
@@ -338,9 +339,14 @@ def main():
     # Required argument for the schedule file
     parser.add_argument('-s','--sch', required=True, help="Name of the schedule file")
     parser.add_argument('-d', '--dets', 
-                        type=int, 
-                        default=100, 
-                        help="Number of detectors")
+                        default="100", 
+                        help="Number of detectors, or FULL for no trimming")
+    parser.add_argument('--module-arrays', '--MODULE_ARRAYS',
+                        dest='MODULE_ARRAYS',
+                        type=int,
+                        default=int(os.environ.get("MODULE_ARRAYS", 1)),
+                        choices=[1, 3],
+                        help="Module arrays to use: 1 selects w2, 3 selects w1/w2/w3 detectors")
     parser.add_argument('-g','--grp_size', default=None, type=int, help="Group size (optional)")
 
     parsed_args = parser.parse_args()
@@ -356,6 +362,25 @@ def main():
 
     # Initialize the communicator
     comm, procs, rank = toast.get_world()
+
+    # Focalplane file preparation 
+    # Rank 0 prepares the focalplane file once; other ranks wait and reuse it.
+    if rank == 0:
+        ndets_selected, fp_filename = fp_trim.build_fp_file(
+            parsed_args.dets,
+            module_arrays=parsed_args.MODULE_ARRAYS,
+        )
+    else:
+        ndets_selected, fp_filename = None, None
+
+    if comm is not None:
+        ndets_selected = comm.bcast(ndets_selected, root=0)
+        fp_filename = comm.bcast(fp_filename, root=0)
+        comm.barrier()
+
+    # Keep detector count consistent with the exact focalplane file used.
+    parsed_args.dets = ndets_selected
+    args = Args(parsed_args)
     
     # Initialize the TOAST logger
     if "OMP_NUM_THREADS" in os.environ:
@@ -373,6 +398,11 @@ def main():
         f"Using TOAST version: {toast.__version__}", comm)
 
     log_global.info_rank(
+        f"Using {parsed_args.MODULE_ARRAYS} module array(s) with {parsed_args.dets} detectors",
+        comm,
+    )
+
+    log_global.info_rank(
         f"Starting timesteam simulation...", comm)
     if rank == 0:
         sim_start_time = t.time()
@@ -384,14 +414,13 @@ def main():
         f"Begin set-up and monitors for Simulating timestream data for PrimeCam/FYST",
         comm)
 
-    # Focalplane file
+    # Load the rank-synchronized focalplane file.
     try:
-        focalplane_file = f"dets_FP_PC280_{parsed_args.dets}_w2.h5"  
-        fp_filename = os.path.join("input_files/fp_files", focalplane_file)
         det_table = QTable.read(fp_filename, path='dettable_trim')
     except Exception as e:
         log_global.error(f"Failed to load focalplane file: {fp_filename}. Error: {e}", comm)
         raise  
+
     
     log_global.info_rank(f"Loading focalplane: {fp_filename}", comm)
     

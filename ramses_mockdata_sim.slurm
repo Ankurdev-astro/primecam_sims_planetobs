@@ -1,34 +1,36 @@
 #!/bin/bash
 
-################################################
-###     SLURM script for primecam_sims      ####
-###      ARRAY JOB runs all schedules       ####
-###					                        ####
-###     Tested on Uni Koeln Ramses Cluster  ####
-###             v1.0 , 08.05.2026           ####
-################################################
+###############################################
+###     SLURM script for planet_sims        ###
+###      ARRAY JOB runs all schedules       ###
+###                                         ###
+###     Tested on Uni Koeln Ramses Cluster  ###
+###             v2.0 , 13.08.2026           ###
+###             Author: Ankur Dev           ###
+###############################################
 
 ### This script runs through all the schedule files
 ### launching SLURM ARRAY jobs for each schedule independently
 ### NOTE: ndets parameter must be set in Section 4
+### The MODULE_ARRAYS parameter is set in Section 4
 
 ### section 1 - SLURM params
 
 #SBATCH --partition=smp
 #SBATCH --account=ag-riechers # For Ramses/ CCAT
 
-#SBATCH --ntasks-per-node 6 # 24 # tasks per node ; num of processes per node
-#SBATCH --cpus-per-task 2 #8 # number of cores per task ; threads per process
+#SBATCH --ntasks-per-node 24 # 24 # tasks per node ; num of processes per node
+#SBATCH --cpus-per-task 8 #8 # number of cores per task ; threads per process
 
 #SBATCH --nodes 1  # number of nodes
 #SBATCH --array=0 #0-23  # Define the array size, 24 schs
 
-#SBATCH --job-name=det100_n6c2_sim 
+#SBATCH --job-name=det100_n24c8_sim 
 ### Job name, det#ndets_#ntaskstotal_#corespertask_sim
 
 #SBATCH --mem=200G                # max mem requested, per node [min 400G for 1000 dets]
 ### Maximum requested time (days-hrs:min:sec)
-#SBATCH --time 0-00:20:00 #estimated runtime max 0-04:00:00
+#SBATCH --time 0-00:30:00 #estimated runtime max 0-04:00:00
 
 #SBATCH --output ./logs_sims/%A_%a_%x.out 
 #SBATCH --error ./logs_sims/%A_%a_%x.err 
@@ -43,8 +45,8 @@ echo "*************"
 echo "Loading Modules and Env..."
 module purge
 ### load all modules needed for Job
-module load lang/Miniconda3/23.9.0-0
 module load lib/mpi4py/3.1.5-gompi-2023b
+module load lang/Miniconda3/23.9.0-0
 ### initiate conda
 conda deactivate
 conda activate toast3
@@ -74,8 +76,12 @@ echo "Using GCC lib: $(which gcc)"
 echo ""
 
 ### section 4 - Set Job parameters
-### Set number of detectors
+### Set number of detectors. Use FULL for no trimming.
 ndets=100
+### ndets=FULL # FULL chooses the maximum ndets available
+
+### Set module arrays: 1 selects w2, 3 selects w1/w2/w3 detectors
+MODULE_ARRAYS=1 # choose from 1 or 3 arrays
 
 ### section 5 - Job Run
 echo "***** EXEC SCRIPT *****"
@@ -93,6 +99,7 @@ echo ""
 echo "Array Task ID: $SLURM_ARRAY_TASK_ID"
 echo "Running schedule file: $schedule_file"
 echo "Number of dets: $ndets"
+echo "Module arrays: $MODULE_ARRAYS"
 echo ""
 
 ### Making detector files
@@ -101,7 +108,7 @@ if [ "$SLURM_ARRAY_TASK_ID" -ne 0 ]; then
     sleep 5
 fi
 ## Run the fp_trim script with the specified number of detectors (ndets)
-python -m scripts.fp_scripts.fp_trim $ndets
+python -m scripts.fp_scripts.fp_trim $ndets --module-arrays $MODULE_ARRAYS
 ## Check if the fp_trim script executed successfully
 if [ $? -ne 0 ]; then
     # If there was an error, print an error message and exit the script
@@ -110,7 +117,7 @@ if [ $? -ne 0 ]; then
 fi
 
 ### Simulating timestream data from schedules
-mpirun -np $SLURM_NTASKS python3 sim_data_primecam_mpi.py -s $schedule_file -d $ndets
+mpirun -np $SLURM_NTASKS python3 sim_data_primecam_mpi.py -s $schedule_file -d $ndets --module-arrays $MODULE_ARRAYS
 
 echo ""
 echo "******** DONE *********"
